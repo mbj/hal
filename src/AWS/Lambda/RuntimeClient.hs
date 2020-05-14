@@ -108,16 +108,21 @@ sendInitError baseRuntimeRequest e =
 
 -- Retry Helpers
 
-runtimeClientRetryTry' :: Int -> IO (Response a) -> IO (Either HttpException (Response a))
-runtimeClientRetryTry' 1 f = try f
-runtimeClientRetryTry' i f = do
+runtimeClientRetryTry' :: Int -> Int -> IO (Response a) -> IO (Either HttpException (Response a))
+runtimeClientRetryTry' _ 1 f = try f
+runtimeClientRetryTry' n i f = do
   resOrEx <- try f
+  -- We use exponential backoff starting with 1ms
+  -- so 1ms -> 2ms -> 4ms -> ...
+  -- We don't introduce jitter because in theory we are the only
+  -- consumer of the endpoint, so no need to "smooth" out the load.
+  let delayMs = 2 ^ (n - i)
   case resOrEx of
-    Left (_ :: HttpException) -> threadDelay 500 >> runtimeClientRetryTry' (i - 1) f
+    Left (_ :: HttpException) -> threadDelay delayMs >> runtimeClientRetryTry' n (i - 1) f
     Right res -> return $ Right res
 
 runtimeClientRetryTry :: IO (Response a) -> IO (Either HttpException (Response a))
-runtimeClientRetryTry = runtimeClientRetryTry' 3
+runtimeClientRetryTry = runtimeClientRetryTry' 5 5
 
 runtimeClientRetry :: IO (Response a) -> IO (Response a)
 runtimeClientRetry = fmap (either throw id) . runtimeClientRetryTry
