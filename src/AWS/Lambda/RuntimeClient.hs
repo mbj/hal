@@ -34,6 +34,8 @@ import           Network.HTTP.Simple       (HttpException,
 import           Network.HTTP.Types.Status (status403, status413, statusIsSuccessful)
 import           System.Environment        (getEnv)
 
+import qualified System.IO                  as IO
+
 -- | Lambda runtime error that we pass back to AWS
 data LambdaError = LambdaError
   { errorMessage :: String,
@@ -108,25 +110,29 @@ sendInitError baseRuntimeRequest e =
 
 -- Retry Helpers
 
-runtimeClientRetryTry' :: Int -> IO (Response a) -> IO (Either HttpException (Response a))
+runtimeClientRetryTry' :: Show a => Int -> IO (Response a) -> IO (Either HttpException (Response a))
 runtimeClientRetryTry' 1 f = try f
-runtimeClientRetryTry' i f = do
-  resOrEx <- try f
-  let retry = threadDelay 500 >> runtimeClientRetryTry' (i - 1) f
-  case resOrEx of
-    Left (_ :: HttpException) -> retry
-    Right res ->
-      -- TODO: Explore this further.
-      -- Before ~July 22nd 2020 it seemed that if a next event request reached
-      -- the runtime before a new event was available that there would be a
-      -- network error.  After it appears that a 403 is returned.
-      if getResponseStatus res == status403 then retry
-      else return $ Right res
+runtimeClientRetryTry' i f = handle =<< try f
+  where
+    handle response = case response of
+      Left (_ :: HttpException) -> retry
+      Right res ->
+        -- TODO: Explore this further.
+        -- Before ~July 22nd 2020 it seemed that if a next event request reached
+        -- the runtime before a new event was available that there would be a
+        -- network error.  After it appears that a 403 is returned.
+        if getResponseStatus res == status403 then retry
+        else return $ Right res
+      where
+        retry = do
+          debug $ "Retrying response: " <> show response
+          threadDelay 500
+          runtimeClientRetryTry' (i - 1) f
 
-runtimeClientRetryTry :: IO (Response a) -> IO (Either HttpException (Response a))
+runtimeClientRetryTry :: Show a => IO (Response a) -> IO (Either HttpException (Response a))
 runtimeClientRetryTry = runtimeClientRetryTry' 3
 
-runtimeClientRetry :: IO (Response a) -> IO (Response a)
+runtimeClientRetry :: Show a => IO (Response a) -> IO (Response a)
 runtimeClientRetry = fmap (either throw id) . runtimeClientRetryTry
 
 
@@ -155,3 +161,6 @@ toEventErrorRequest reqId e =
 toInitErrorRequest :: String -> Request -> Request
 toInitErrorRequest e =
   setRequestPath "2018-06-01/runtime/init/error" . toBaseErrorRequest e
+
+debug :: String -> IO ()
+debug = IO.hPutStrLn IO.stderr
